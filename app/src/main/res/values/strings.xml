@@ -4,6 +4,7 @@
     <string name="error_login">Неверный логин / пароль</string>
     <string name="error_network">Нет связи с сервером</string>
     <string name="error_empty">Введите логин и пароль</string>
+    <string name="offline">Нет подключения к интернету</string>
 
     <string name="login_title">Вход</string>
     <string name="login_name">Логин</string>

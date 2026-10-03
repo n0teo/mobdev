@@ -2,6 +2,8 @@ package io.github.mobdev
 
 import android.app.Application
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -23,23 +25,67 @@ data class ChatState(
     val messageText: String = "",
     val openedImage: String? = null,
     val isLoading: Boolean = false,
+    val isOnline: Boolean = true,
     val error: Int? = null
 )
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefs = application.getSharedPreferences("chat", Context.MODE_PRIVATE)
+    private val cache = ChatCache(application)
+    private val connectivityManager = application.getSystemService(ConnectivityManager::class.java)
     private var token: String? = null
 
     var state by mutableStateOf(ChatState())
         private set
 
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: android.net.Network) {
+            viewModelScope.launch { onNetworkChanged(true) }
+        }
+
+        override fun onLost(network: android.net.Network) {
+            viewModelScope.launch { onNetworkChanged(false) }
+        }
+    }
+
     init {
+        state = state.copy(isOnline = isOnlineNow(), channels = cache.loadChannels())
+        connectivityManager.registerDefaultNetworkCallback(networkCallback)
+
         val name = prefs.getString("name", null)
         val password = prefs.getString("password", null)
         if (name != null && password != null) {
             state = state.copy(isLoggedIn = true, userName = name)
             login(name, password)
+        }
+    }
+
+    override fun onCleared() {
+        connectivityManager.unregisterNetworkCallback(networkCallback)
+    }
+
+    private fun isOnlineNow(): Boolean {
+        val network = connectivityManager.activeNetwork ?: return false
+        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    private fun onNetworkChanged(online: Boolean) {
+        val wasOffline = !state.isOnline
+        state = state.copy(isOnline = online)
+
+        if (online && wasOffline && state.isLoggedIn) {
+            val name = prefs.getString("name", null)
+            val password = prefs.getString("password", null)
+            if (token == null && name != null && password != null) {
+                login(name, password)
+            } else {
+                loadChannels()
+                if (state.selectedChannel != null) {
+                    loadMessages(NEWEST_ID)
+                }
+            }
         }
     }
 
@@ -55,11 +101,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 prefs.edit().putString("name", name).putString("password", password).apply()
                 state = state.copy(isLoggedIn = true, userName = name, isLoading = false)
                 loadChannels()
+                if (state.selectedChannel != null) {
+                    loadMessages(NEWEST_ID)
+                }
             } catch (e: HttpException) {
                 prefs.edit().clear().apply()
-                state = ChatState(error = R.string.error_login)
+                state = ChatState(error = R.string.error_login, isOnline = state.isOnline)
             } catch (e: Exception) {
-                state = state.copy(isLoading = false, error = R.string.error_network)
+                state = state.copy(isLoading = false)
+                showNetworkError()
             }
         }
     }
@@ -72,19 +122,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     Network.api.logout(oldToken)
                 }
             } catch (e: Exception) {
+                // сервер всё равно забудет токен, ошибку можно не показывать
             }
         }
         token = null
         prefs.edit().clear().apply()
-        state = ChatState()
+        state = ChatState(isOnline = state.isOnline)
     }
 
     fun loadChannels() {
         viewModelScope.launch {
             try {
                 val channels = Network.api.getChannels()
+                cache.saveChannels(channels)
                 state = state.copy(channels = channels)
             } catch (e: Exception) {
+                state = state.copy(channels = cache.loadChannels())
                 handleError(e)
             }
         }
@@ -93,7 +146,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun openChannel(channel: String) {
         state = state.copy(
             selectedChannel = channel,
-            messages = emptyList(),
+            messages = cache.loadMessages(channel),
             canLoadMore = true,
             messageText = ""
         )
@@ -116,8 +169,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             state = state.copy(isLoading = true)
             try {
                 val loaded = Network.api.getMessages(channel, PAGE_SIZE, lastKnownId, true)
-                val older = loaded.reversed()
-                val all = if (lastKnownId == NEWEST_ID) older else older + state.messages
+                if (state.selectedChannel != channel) return@launch
+
+                val all = (state.messages + loaded)
+                    .distinctBy { it.id }
+                    .sortedBy { it.id }
+                cache.saveMessages(channel, all)
                 state = state.copy(
                     messages = all,
                     canLoadMore = loaded.size == PAGE_SIZE,
@@ -138,7 +195,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val text = state.messageText.trim()
         val channel = state.selectedChannel ?: return
         val currentToken = token ?: return
-        if (text.isEmpty()) return
+        if (text.isEmpty() || !state.isOnline) return
 
         val message = Message(
             id = null,
@@ -180,6 +237,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 logout()
             }
         } else {
+            showNetworkError()
+        }
+    }
+
+    private fun showNetworkError() {
+        if (state.isOnline) {
             state = state.copy(error = R.string.error_network)
         }
     }

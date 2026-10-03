@@ -85,7 +85,7 @@ fun MessagesScreen(viewModel: ChatViewModel, modifier: Modifier = Modifier) {
             Spacer(modifier = Modifier.width(8.dp))
             Button(
                 onClick = { viewModel.sendMessage() },
-                enabled = state.messageText.isNotBlank()
+                enabled = state.messageText.isNotBlank() && state.isOnline
             ) {
                 Text(stringResource(R.string.send))
             }
